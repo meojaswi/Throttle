@@ -6,14 +6,14 @@ in-memory fallback, plus net/http middleware.
 
 ## Algorithms
 
-|               | Token bucket (`Rule`)       | Sliding window counter (`WindowRule`) |
-| ------------- | --------------------------- | ------------------------------------- |
-| Limit means   | Steady rate + allowed burst | Hard cap per rolling window           |
-| Bursts        | Yes, up to `Burst`          | No                                    |
-| Good for      | General API traffic         | OTP/login, plan quotas ("1000/hour")  |
-| State per key | tokens, last timestamp      | prev count, curr count, window index  |
-| Redis         | `NewRedis`                  | `NewRedisWindow`                      |
-| Memory        | `NewMemory`                 | `NewMemoryWindow`                     |
+| | Token bucket (`Rule`) | Sliding window counter (`WindowRule`) |
+|---|---|---|
+| Limit means | Steady rate + allowed burst | Approximate cap per rolling window (no instant boundary burst) |
+| Bursts | Yes, up to `Burst` | No |
+| Good for | General API traffic | OTP/login, plan quotas ("1000/hour") |
+| State per key | tokens, last timestamp | prev count, curr count, window index |
+| Redis | `NewRedis` | `NewRedisWindow` |
+| Memory | `NewMemory` | `NewMemoryWindow` |
 
 The sliding window counter keeps only two counters per key and estimates the
 rolling count as `prev × (unelapsed fraction of prev window) + curr`. This
@@ -53,7 +53,7 @@ mw := middleware.RateLimit(middleware.Options{
 mux.Handle("/api/", mw(apiHandler))
 ```
 
-Hard quota with the sliding window (fail closed for sensitive endpoints):
+Per-window quota with the sliding window (fail closed for sensitive endpoints):
 
 ```go
 otpRule := limiter.WindowRule{Limit: 3, Window: time.Minute}  // 3 per rolling minute
@@ -73,18 +73,18 @@ different fields under their keys.
 
 ## Why it's production-grade
 
-| Concern                           | How it's handled                                                                                                        |
-| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Race between instances            | Whole read-refill-write runs in one Lua script → Redis executes it atomically                                           |
-| Clock skew between servers        | Script uses Redis `TIME`, not the app's clock                                                                           |
-| Memory growth                     | Redis keys get `PEXPIRE`; in-memory buckets evicted by a janitor                                                        |
-| Lock contention (in-memory)       | 64 sharded mutexes instead of one global lock                                                                           |
-| Redis outage                      | `Fallback` switches to a local limiter; circuit breaker skips Redis for `Cooldown` so requests don't each eat a timeout |
-| Slow Redis                        | Per-call context timeout (default 50ms) + client read/write timeouts                                                    |
-| IP spoofing via `X-Forwarded-For` | `KeyByIP` ignores it; `KeyByTrustedProxyIP` only trusts it from your own LB CIDRs                                       |
-| Client feedback                   | `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After`                                              |
-| Weighted endpoints                | `Options.Cost` — e.g. a search costs 5 tokens, a GET costs 1                                                            |
-| Fail-open vs fail-closed          | Configurable per route (login/OTP → fail closed)                                                                        |
+| Concern | How it's handled |
+|---|---|
+| Race between instances | Whole read-refill-write runs in one Lua script → Redis executes it atomically |
+| Clock skew between servers | Script uses Redis `TIME`, not the app's clock |
+| Memory growth | Redis keys get `PEXPIRE`; in-memory buckets evicted by a janitor |
+| Lock contention (in-memory) | 64 sharded mutexes instead of one global lock |
+| Redis outage | `Fallback` switches to a local limiter; circuit breaker skips Redis for `Cooldown` so requests don't each eat a timeout |
+| Slow Redis | Per-call context timeout (default 50ms) + client read/write timeouts |
+| IP spoofing via `X-Forwarded-For` | `KeyByIP` ignores it; `KeyByTrustedProxyIP` only trusts it from your own LB CIDRs |
+| Client feedback | `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `Retry-After` |
+| Weighted endpoints | `Options.Cost` — e.g. a search costs 5 tokens, a GET costs 1 |
+| Fail-open vs fail-closed | Configurable per route (login/OTP → fail closed) |
 
 ## Next steps for real deployment
 
